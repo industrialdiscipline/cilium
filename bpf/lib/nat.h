@@ -321,6 +321,87 @@ static __always_inline int snat_v4_handle_mapping(struct __ctx_buff *ctx,
 		return snat_v4_new_mapping(ctx, tuple, (*state = tmp), target);
 }
 
+static __always_inline int snat_v4_rewrite_embedded(struct __ctx_buff *ctx,
+						    struct ipv4_ct_tuple *tuple,
+						    struct ipv4_nat_entry *state,
+							__u32 off)
+{
+	struct csum_offset csum = {};
+	__be32 sum;
+	struct iphdr iphdr;
+	__u32 erroff;
+
+	if (ctx_load_bytes(ctx, off + sizeof(struct icmphdr), &iphdr,
+			   sizeof(iphdr)) < 0)
+		return DROP_INVALID;
+
+	/* The variable `erroff` is offset to L4 header of inner packet,
+	 * where `off` is offset to L4 header of outer packet.
+	 */
+	erroff = off + sizeof(struct icmphdr) + iphdr.ihl * 4;
+
+	if (state->to_daddr == tuple->daddr &&
+	    state->to_dport == tuple->dport)
+		return 0;
+
+	sum = csum_diff(&tuple->daddr, 4, &state->to_daddr, 4, 0);
+	csum_l4_offset_and_flags(tuple->nexthdr, &csum);
+	if (state->to_dport != tuple->dport) {
+		__be32 sum_l4 = 0;
+
+		/* Outer packet has ICMP header */
+		csum.offset = offsetof(struct icmphdr, checksum);
+
+		switch (tuple->nexthdr) {
+		case IPPROTO_TCP:
+		case IPPROTO_UDP: {
+			/* In case that the destination port has been NATed from
+			 * target to dest. We want the embedded packet which
+			 * should refer to endpoint dest going back to original.
+			 */
+			if (ctx_store_bytes(ctx, erroff + offsetof(struct tcphdr, source),
+								&state->to_dport, sizeof(state->to_dport), 0) < 0)
+				return DROP_WRITE_ERROR;
+
+			/* Update csum of outer packet to refer the change. */
+			sum_l4 = csum_diff(&tuple->dport, 4, &state->to_dport, 4, 0);
+			if (csum_l4_replace(ctx, off, &csum, 0, sum_l4, 0) < 0)
+				return DROP_CSUM_L4;
+			break;
+		}
+		case IPPROTO_ICMP: {
+			/* In case that the ID has been used as source port during
+			 * NAT from target to dest. We want the embedded packet
+			 * which should refer to endpoint -> dest going back to
+			 * original.
+			 */
+			if (ctx_store_bytes(ctx, erroff +
+								offsetof(struct icmphdr, un.echo.id),
+								&state->to_dport,
+								sizeof(state->to_dport), 0) < 0)
+				return DROP_WRITE_ERROR;
+
+			/* Update csum of outer packet to refer the change. */
+			sum_l4 = csum_diff(&tuple->dport, 4, & state->to_dport, 4, 0);
+			if (csum_l4_replace(ctx, off, &csum, 0, sum_l4, 0) < 0)
+				return DROP_CSUM_L4;
+
+			break;
+		}}
+	}
+
+	/* Change IP of in source address of inner packet to refer the
+	 * endpoint and update csum of outer accordinly. */
+	if (ctx_store_bytes(ctx, off + sizeof(struct icmphdr) + offsetof(struct iphdr, saddr),
+						&state->to_daddr, 4, 0) < 0)
+		return DROP_WRITE_ERROR;
+	if (l3_csum_replace(ctx, ETH_HLEN + offsetof(struct iphdr, check),
+			    0, sum, 0) < 0)
+		return DROP_CSUM_L3;
+
+	return 0;
+}
+
 static __always_inline int snat_v4_rewrite_egress(struct __ctx_buff *ctx,
 						  struct ipv4_ct_tuple *tuple,
 						  struct ipv4_nat_entry *state,
@@ -382,7 +463,7 @@ static __always_inline int snat_v4_rewrite_egress(struct __ctx_buff *ctx,
 static __always_inline int snat_v4_rewrite_ingress(struct __ctx_buff *ctx,
 						   struct ipv4_ct_tuple *tuple,
 						   struct ipv4_nat_entry *state,
-						   __u32 off)
+						   __u32 off, __u8 nexthdr)
 {
 	int ret, flags = BPF_F_PSEUDO_HDR;
 	struct csum_offset csum = {};
@@ -392,9 +473,12 @@ static __always_inline int snat_v4_rewrite_ingress(struct __ctx_buff *ctx,
 	    state->to_dport == tuple->dport)
 		return 0;
 	sum = csum_diff(&tuple->daddr, 4, &state->to_daddr, 4, 0);
-	csum_l4_offset_and_flags(tuple->nexthdr, &csum);
+	csum_l4_offset_and_flags(nexthdr, &csum);
 	if (state->to_dport != tuple->dport) {
-		switch (tuple->nexthdr) {
+		/* nexthdr is pointing to the iphdr received. The NAT tuple
+		 * may have a different header in case of ICMP Error message.
+		 */
+		switch (nexthdr) {
 		case IPPROTO_TCP:
 		case IPPROTO_UDP:
 			ret = l4_modify_port(ctx, off,
@@ -405,18 +489,25 @@ static __always_inline int snat_v4_rewrite_ingress(struct __ctx_buff *ctx,
 				return ret;
 			break;
 		case IPPROTO_ICMP: {
+			__u8 type = 0;
 			__be32 from, to;
 
-			if (ctx_store_bytes(ctx, off +
-					    offsetof(struct icmphdr, un.echo.id),
-					    &state->to_dport,
-					    sizeof(state->to_dport), 0) < 0)
+			if (ctx_load_bytes(ctx, off +
+					   offsetof(struct icmphdr, type),
+					   &type, 1) < 0)
 				return DROP_WRITE_ERROR;
-			from = tuple->dport;
-			to = state->to_dport;
-			flags = 0; /* ICMPv4 has no pseudo-header */
-			sum_l4 = csum_diff(&from, 4, &to, 4, 0);
-			csum.offset = offsetof(struct icmphdr, checksum);
+			if (type == ICMP_ECHO || type == ICMP_ECHOREPLY) {
+				if (ctx_store_bytes(ctx, off +
+						    offsetof(struct icmphdr, un.echo.id),
+						    &state->to_dport,
+						    sizeof(state->to_dport), 0) < 0)
+					return DROP_WRITE_ERROR;
+				from = tuple->dport;
+				to = state->to_dport;
+				flags = 0; /* ICMPv4 has no pseudo-header */
+				sum_l4 = csum_diff(&from, 4, &to, 4, 0);
+				csum.offset = offsetof(struct icmphdr, checksum);
+			}
 			break;
 		}}
 	}
@@ -426,7 +517,7 @@ static __always_inline int snat_v4_rewrite_ingress(struct __ctx_buff *ctx,
 	if (l3_csum_replace(ctx, ETH_HLEN + offsetof(struct iphdr, check),
 			    0, sum, 0) < 0)
 		return DROP_CSUM_L3;
-	if (tuple->nexthdr == IPPROTO_ICMP)
+	if (nexthdr == IPPROTO_ICMP)
 		sum = sum_l4;
 	if (csum.offset &&
 	    csum_l4_replace(ctx, off, &csum, 0, sum, flags) < 0)
@@ -517,16 +608,19 @@ snat_v4_process(struct __ctx_buff *ctx, enum nat_dir dir,
 		__be16 sport;
 		__be16 dport;
 	} l4hdr;
-	bool icmp_echoreply = false;
+	bool icmp_echoreply = false, rewrite_embedded = false;
 	__u64 off;
 	int ret;
+	__u8 type, nexthdr;
 
 	build_bug_on(sizeof(struct ipv4_nat_entry) > 64);
 
 	if (!revalidate_data(ctx, &data, &data_end, &ip4))
 		return DROP_INVALID;
 
-	tuple.nexthdr = ip4->protocol;
+	nexthdr = ip4->protocol;
+
+	tuple.nexthdr = nexthdr;
 	tuple.daddr = ip4->daddr;
 	tuple.saddr = ip4->saddr;
 	tuple.flags = dir;
@@ -553,6 +647,68 @@ snat_v4_process(struct __ctx_buff *ctx, enum nat_dir dir,
 			tuple.sport = 0;
 			icmp_echoreply = true;
 			break;
+		case ICMP_DEST_UNREACH:
+			switch (icmphdr.code) {
+			case ICMP_FRAG_NEEDED: {
+				struct iphdr iphdr;
+				__be16 identifier;
+				__u32 icmpoff = off + sizeof(icmphdr);
+
+				/* According to the RFC 5508, any networking
+				 * equipment that is responding with an ICMP Error
+				 * packet should embed the original packet in its
+				 * response.
+				 */
+
+				if (ctx_load_bytes(ctx, icmpoff, &iphdr,
+						   sizeof(iphdr)) < 0)
+					return DROP_INVALID;
+
+				/* From the embedded IP headers we should be able
+				 * to determine corresponding protocol, IP src/dst
+				 * of the packet sent to resolve the NAT session.
+				 */
+				tuple.nexthdr = iphdr.protocol;
+				tuple.saddr = iphdr.daddr;
+				tuple.daddr = iphdr.saddr;
+
+				icmpoff += iphdr.ihl * 4;
+				switch (tuple.nexthdr) {
+				case IPPROTO_TCP:
+				case IPPROTO_UDP:
+					if (ctx_load_bytes(ctx, icmpoff, &l4hdr,
+							   sizeof(l4hdr)) < 0)
+						return DROP_INVALID;
+					tuple.sport = l4hdr.dport;
+					tuple.dport = l4hdr.sport;
+					break;
+				case IPPROTO_ICMP:
+					/* No reasons to see a packet different than
+					 * ICMP_ECHO.
+					 */
+					if (ctx_load_bytes(ctx, icmpoff, &type, sizeof(type)) < 0 ||
+					    type != ICMP_ECHO)
+						return DROP_INVALID;
+					if (ctx_load_bytes(ctx, icmpoff +
+							   offsetof(struct icmphdr, un.echo.id),
+							   &identifier, sizeof(identifier)) < 0)
+						return DROP_INVALID;
+					tuple.sport = 0;
+					tuple.dport = identifier;
+					break;
+				default:
+					return DROP_INVALID;
+				}
+				/* Rewrite embedded packet. The source IP should be
+				 * switched to endpoint.
+				 */
+				rewrite_embedded = true;
+				break;
+			}
+			default:
+				return DROP_UNKNOWN_ICMP_CODE;
+			}
+			break;
 		default:
 			return DROP_NAT_UNSUPP_PROTO;
 		}
@@ -569,9 +725,25 @@ snat_v4_process(struct __ctx_buff *ctx, enum nat_dir dir,
 	if (ret < 0)
 		return ret;
 
+	/* TODO(sahid): An effort will be taken to refactor the whole
+	 * process, basically by splitting the process between
+	 * ingress/egress and reworking the `rewrite_` functions to
+	 * extract the common parts. This would give the benefit for
+	 * future growth. Doing that before adding code for feature #12968
+	 * would not reveal the need, and doing it at the same time would
+	 * add too many unrelated changes.
+	 */
+
+	if (dir == NAT_DIR_INGRESS && rewrite_embedded) {
+		/* Rewrite source of embedded packet returned by ICMP Error. */
+		ret = snat_v4_rewrite_embedded(ctx, &tuple, state, off);
+		if (ret < 0)
+			return ret;
+	}
+
 	return dir == NAT_DIR_EGRESS ?
 	       snat_v4_rewrite_egress(ctx, &tuple, state, off, ipv4_has_l4_header(ip4)) :
-	       snat_v4_rewrite_ingress(ctx, &tuple, state, off);
+	       snat_v4_rewrite_ingress(ctx, &tuple, state, off, nexthdr);
 }
 #else
 static __always_inline __maybe_unused
