@@ -647,15 +647,17 @@ snat_v4_rev_nat(struct __ctx_buff *ctx, const struct ipv4_nat_target *target)
 	case IPPROTO_ICMP:
 		if (ctx_load_bytes(ctx, off, &icmphdr, sizeof(icmphdr)) < 0)
 			return DROP_INVALID;
-		if (icmphdr.type != ICMP_ECHO &&
-		    icmphdr.type != ICMP_ECHOREPLY)
-			return DROP_NAT_UNSUPP_PROTO;
-		if (icmphdr.type == ICMP_ECHO) {
+		switch (icmphdr.type) {
+		case ICMP_ECHO:
 			tuple.dport = 0;
 			tuple.sport = icmphdr.un.echo.id;
-		} else {
+			break;
+		case ICMP_ECHOREPLY:
 			tuple.dport = icmphdr.un.echo.id;
 			tuple.sport = 0;
+			break;
+		default:
+			return DROP_NAT_UNSUPP_PROTO;
 		}
 		break;
 	default:
