@@ -1039,6 +1039,8 @@ snat_v6_process(struct __ctx_buff *ctx, enum nat_dir dir,
 			tuple.sport = 0;
 			icmp_echoreply = true;
 			break;
+		case ICMPV6_PKT_TOOBIG:
+			break;
 		default:
 			return DROP_NAT_UNSUPP_PROTO;
 		}
