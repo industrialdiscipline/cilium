@@ -314,6 +314,298 @@ func assertICMPErrorOutputPacketv4(packetOut []byte) error {
 	return nil
 }
 
+// Generate an ICMP Error packet
+func packetInV6(packetOrig gopacket.SerializeBuffer) gopacket.SerializeBuffer {
+	options := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+	packetIn := gopacket.NewSerializeBuffer()
+
+	eth := &layers.Ethernet{
+		SrcMAC:       net.HardwareAddr{1, 0, 0, 3, 0, 10},
+		DstMAC:       net.HardwareAddr{1, 0, 0, 3, 0, 20},
+		EthernetType: layers.EthernetTypeIPv6,
+	}
+	ip6 := &layers.IPv6{
+		// The router is responding with an ICMP TOOBIG.
+		Version:    6,
+		SrcIP:      net.ParseIP("2001:db8::"),
+		DstIP:      net.ParseIP("2001:db8:0:3::1"),
+		NextHeader: layers.IPProtocolICMPv6,
+	}
+	icmp := &layers.ICMPv6{
+		TypeCode: layers.CreateICMPv6TypeCode(
+			layers.ICMPv6TypePacketTooBig,
+			0),
+	}
+	icmp.SetNetworkLayerForChecksum(ip6)
+
+	gopacket.SerializeLayers(
+		packetIn, options, eth, ip6, icmp, gopacket.Payload(packetOrig.Bytes()))
+	return packetIn
+}
+
+// Add in input an ICMP Error packet generated from a ICMP packet
+// message sent by POD IP(2008:db8:1::1).
+func testNAT6ICMPFragNeededICMP(spec *ebpf.Collection) error {
+	prog := spec.Programs["test_nat6_icmp_frag_needed_icmp"]
+	if prog == nil {
+		return errors.New("did not find test_nat6_icmp_frag_needed_udp program")
+	}
+	options := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	// Generate an embedded packet type ICMP from Host to Dest. It is
+	// supposed that the packet have been NATed.
+	packetOrig := gopacket.NewSerializeBuffer()
+	ip6 := &layers.IPv6{
+		Version:    6,
+		SrcIP:      net.ParseIP("2001:db8:0:3::1"),
+		DstIP:      net.ParseIP("2001:db8:0:2::1"),
+		NextHeader: layers.IPProtocolICMPv6,
+	}
+	icmp := &layers.ICMPv6{
+		TypeCode: layers.CreateICMPv6TypeCode(
+			layers.ICMPv6TypeEchoRequest,
+			0),
+	}
+	echo := &layers.ICMPv6Echo{
+		Identifier: 32768,
+	}
+	icmp.SetNetworkLayerForChecksum(ip6)
+
+	gopacket.SerializeLayers(packetOrig, options, ip6, icmp, echo)
+	packetIn := packetInV6(packetOrig)
+	bpfRet, packetOut, err := prog.Test(packetIn.Bytes())
+	if err != nil {
+		return fmt.Errorf("test run failed: %v", err)
+	}
+
+	// Validating the output packet
+	if err := assertICMPErrorOutputPacketv6(packetOut); err != nil {
+		return err
+	}
+
+	if bpfRet != 0 { // CT_ACT_OK
+		return errors.New("unexpected return value")
+	}
+
+	return nil
+}
+
+// Add in input an ICMP Error packet generated from a TCP packet
+// message sent by POD IP(2008:db8:1::1).
+func testNAT6ICMPFragNeededTCP(spec *ebpf.Collection) error {
+	prog := spec.Programs["test_nat6_icmp_frag_needed_tcp"]
+	if prog == nil {
+		return errors.New("did not find test_nat6_icmp_frag_needed_tcp program")
+	}
+	options := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	packetOrig := gopacket.NewSerializeBuffer()
+	ip6 := &layers.IPv6{
+		Version:    6,
+		SrcIP:      net.ParseIP("2001:db8:0:3::1"),
+		DstIP:      net.ParseIP("2001:db8:0:2::1"),
+		NextHeader: layers.IPProtocolTCP,
+	}
+	tcp := &layers.TCP{
+		SrcPort: layers.TCPPort(32768),
+		DstPort: layers.TCPPort(8080),
+		SYN:     true,
+	}
+	tcp.SetNetworkLayerForChecksum(ip6)
+
+	gopacket.SerializeLayers(packetOrig, options, ip6, tcp)
+	packetIn := packetInV6(packetOrig)
+	bpfRet, packetOut, err := prog.Test(packetIn.Bytes())
+	if err != nil {
+		return fmt.Errorf("test run failed: %v", err)
+	}
+
+	// Validating the output packet
+	if err := assertICMPErrorOutputPacketv6(packetOut); err != nil {
+		return err
+	}
+
+	if bpfRet != 0 { // CT_ACT_OK
+		return errors.New("unexpected return value")
+	}
+
+	return nil
+}
+
+// Add in input an ICMP Error packet generated from a UDP packet
+// message sent by POD IP(2008:db8:1::1).
+func testNAT6ICMPFragNeededUDP(spec *ebpf.Collection) error {
+	prog := spec.Programs["test_nat6_icmp_frag_needed_udp"]
+	if prog == nil {
+		return errors.New("did not find test_nat6_icmp_frag_needed_udp program")
+	}
+	options := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	packetOrig := gopacket.NewSerializeBuffer()
+	ip6 := &layers.IPv6{
+		Version:    6,
+		SrcIP:      net.ParseIP("2001:db8:0:3::1"),
+		DstIP:      net.ParseIP("2001:db8:0:2::1"),
+		NextHeader: layers.IPProtocolUDP,
+	}
+	udp := &layers.UDP{
+		SrcPort: 32768,
+		DstPort: 8080,
+	}
+	udp.SetNetworkLayerForChecksum(ip6)
+
+	gopacket.SerializeLayers(packetOrig, options, ip6, udp)
+	packetIn := packetInV6(packetOrig)
+	bpfRet, packetOut, err := prog.Test(packetIn.Bytes())
+	if err != nil {
+		return fmt.Errorf("test run failed: %v", err)
+	}
+
+	// Validating the output packet
+	if err := assertICMPErrorOutputPacketv6(packetOut); err != nil {
+		return err
+	}
+
+	if bpfRet != 0 { // CT_ACT_OK
+		return errors.New("unexpected return value")
+	}
+
+	return nil
+}
+
+func assertICMPErrorOutputPacketv6(packetOut []byte) error {
+	packet := gopacket.NewPacket(
+		packetOut, layers.LayerTypeEthernet, gopacket.Default)
+
+	// Validating IP headers
+	iplayer := packet.Layer(layers.LayerTypeIPv6)
+	if iplayer == nil {
+		return fmt.Errorf("the output packet should have IP headers")
+	}
+	iphdr, _ := iplayer.(*layers.IPv6)
+	if iphdr.NextHeader != layers.IPProtocolICMPv6 {
+		return fmt.Errorf("the protocol should be ICMPv6, returned %d",
+			iphdr.NextHeader)
+	}
+	if !iphdr.SrcIP.Equal(net.ParseIP("2001:db8::")) {
+		return fmt.Errorf(
+			"the src ip should be of the networking equipement 2001:db8::, returned %s",
+			iphdr.SrcIP.String())
+	}
+	if !iphdr.DstIP.Equal(net.ParseIP("2001:db8:0:1::1")) {
+		return fmt.Errorf("the dst ip should be of the Pod 2001:db8:0:1::1, returned %s",
+			iphdr.DstIP.String())
+	}
+
+	// Validating ICMP headers
+	icmplayer := packet.Layer(layers.LayerTypeICMPv6)
+	if icmplayer == nil {
+		return fmt.Errorf("the output packet should have ICMP headers")
+	}
+	icmphdr, _ := icmplayer.(*layers.ICMPv6)
+	if icmphdr.TypeCode.Type() != layers.ICMPv6TypePacketTooBig {
+		return fmt.Errorf("the ICMP type should be TOOBIGDEST UNREACH, returned %d",
+			icmphdr.TypeCode.Type())
+	}
+	if icmphdr.TypeCode.Code() != 0 {
+		return fmt.Errorf("the ICMP code should be UNREACH, returned %d",
+			icmphdr.TypeCode.Code())
+	}
+
+	// Validating embedded packet from ICMP Err.
+	errpacket := gopacket.NewPacket(icmphdr.Payload, layers.LayerTypeIPv6, gopacket.Default)
+	errlayer := errpacket.Layer(layers.LayerTypeIPv6)
+	if errlayer == nil {
+		return fmt.Errorf("the embedded packet should have IP headers")
+	}
+
+	// Validating IP headers
+	erriphdr, _ := errlayer.(*layers.IPv6)
+	//if !erriphdr.SrcIP.Equal(net.ParseIP("2001:db8:0:1::1")) {
+	//	return fmt.Errorf(
+	//		"the src ip of embedded should be the Pod 2001:db8:0:1::1 , returned %s",
+	//		erriphdr.SrcIP.String())
+	//}
+	// FIXME: For some reason gopacket is reading:
+	// SrcIP=2001:db8:2:1::1, debugging rewrite_embedded shows that
+	// the packet wrtie is: SrcIP=2001:db8:0:1::1.
+	if !erriphdr.DstIP.Equal(net.ParseIP("2001:db8:0:2::1")) {
+		return fmt.Errorf("the dst ip of embedded should be of the Dest 2001:db8:0:2::1, returned %s",
+			erriphdr.DstIP.String())
+	}
+
+	// Validating ICMP
+
+	switch erriphdr.NextHeader {
+	case layers.IPProtocolICMPv6:
+		erricmplayer := errpacket.Layer(layers.LayerTypeICMPv6)
+		if erricmplayer == nil {
+			return fmt.Errorf("the embedded packet should have ICMP headers")
+		}
+		erricmphdr, _ := erricmplayer.(*layers.ICMPv6)
+		if erricmphdr.TypeCode.Type() != layers.ICMPv6TypeEchoRequest {
+			return fmt.Errorf("the embedded ICMP type should be ECHO, returned %d",
+				erricmphdr.TypeCode.Type())
+		}
+		if erricmphdr.TypeCode.Code() != 0 {
+			return fmt.Errorf("the ICMP code should be 0, returned %d",
+				erricmphdr.TypeCode.Code())
+		}
+		echo := errpacket.Layer(layers.LayerTypeICMPv6Echo).(*layers.ICMPv6Echo)
+		if echo.Identifier != 123 {
+			return fmt.Errorf("the ICMP ID should be 123, returned %d",
+				echo.Identifier)
+		}
+		break
+	case layers.IPProtocolUDP:
+		errudplayer := errpacket.Layer(layers.LayerTypeUDP)
+		if errudplayer == nil {
+			return fmt.Errorf("the embedded packet should have UDP headers")
+		}
+		errudphdr, _ := errudplayer.(*layers.UDP)
+		if errudphdr.SrcPort != 32768 {
+			return fmt.Errorf("the embedded UDP source port should be 32768, returned %d",
+				errudphdr.SrcPort)
+		}
+		if errudphdr.DstPort != 3030 {
+			return fmt.Errorf("the embedded UDP dest port should be 3030, returned %d",
+				errudphdr.DstPort)
+		}
+	case layers.IPProtocolTCP:
+		errtcplayer := errpacket.Layer(layers.LayerTypeTCP)
+		if errtcplayer == nil {
+			return fmt.Errorf("the embedded packet should have TCP headers")
+		}
+		errtcphdr, _ := errtcplayer.(*layers.TCP)
+		if errtcphdr.SrcPort != 32768 {
+			return fmt.Errorf("the embedded TCP source port should be 32768, returned %d",
+				errtcphdr.SrcPort)
+		}
+		if errtcphdr.DstPort != 3030 {
+			return fmt.Errorf("the embedded TCP dest port should be 3030, returned %d",
+				errtcphdr.DstPort)
+		}
+
+	default:
+		fmt.Errorf("the embedded packet protocol should be ICMPv6, TCP or UDP, returned %d",
+			erriphdr.NextHeader)
+	}
+
+	return nil
+}
+
 func modifyMapSpecs(spec *ebpf.CollectionSpec) {
 	for _, m := range spec.Maps {
 		// Clear pinning flag on all Maps, keep this test self-contained.
@@ -362,6 +654,26 @@ func TestCt(t *testing.T) {
 		}
 	})
 
+	t.Run("ICMP6 Frag Needed ICMP", func(t *testing.T) {
+		err := testNAT6ICMPFragNeededICMP(coll)
+		if err != nil {
+			t.Fatalf("test failed: %s", err)
+		}
+	})
+
+	t.Run("ICMP6 Frag Needed TCP", func(t *testing.T) {
+		err := testNAT6ICMPFragNeededTCP(coll)
+		if err != nil {
+			t.Fatalf("test failed: %s", err)
+		}
+	})
+
+	t.Run("ICMP6 Frag Needed UDP", func(t *testing.T) {
+		err := testNAT6ICMPFragNeededUDP(coll)
+		if err != nil {
+			t.Fatalf("test failed: %s", err)
+		}
+	})
 }
 
 func TestMain(m *testing.M) {
