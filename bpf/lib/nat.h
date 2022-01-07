@@ -542,16 +542,19 @@ snat_v4_process(struct __ctx_buff *ctx, enum nat_dir dir,
 	case IPPROTO_ICMP:
 		if (ctx_load_bytes(ctx, off, &icmphdr, sizeof(icmphdr)) < 0)
 			return DROP_INVALID;
-		if (icmphdr.type != ICMP_ECHO &&
-		    icmphdr.type != ICMP_ECHOREPLY)
-			return DROP_NAT_UNSUPP_PROTO;
-		if (icmphdr.type == ICMP_ECHO) {
+
+		switch (icmphdr.type) {
+		case ICMP_ECHO:
 			tuple.dport = 0;
 			tuple.sport = icmphdr.un.echo.id;
-		} else {
+			break;
+		case ICMP_ECHOREPLY:
 			tuple.dport = icmphdr.un.echo.id;
 			tuple.sport = 0;
 			icmp_echoreply = true;
+			break;
+		default:
+			return DROP_NAT_UNSUPP_PROTO;
 		}
 		break;
 	default:
