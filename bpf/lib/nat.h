@@ -551,6 +551,11 @@ snat_v4_process(struct __ctx_buff *ctx, enum nat_dir dir,
 			tuple.sport = 0;
 			icmp_echoreply = true;
 			break;
+		case ICMP_DEST_UNREACH:
+			switch (icmphdr.code) {
+			case ICMP_FRAG_NEEDED:
+				break;
+			}
 		default:
 			return DROP_NAT_UNSUPP_PROTO;
 		}
