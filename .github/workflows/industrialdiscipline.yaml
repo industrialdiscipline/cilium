@@ -1,0 +1,20 @@
+name: Industrial Discipline - Docker Image
+
+on:
+  workflow_dispatch:
+
+jobs:
+
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Log in to Docker Hub
+      uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
+      with:
+        username: industrialdiscipline
+        password: ${{ secrets.HUB_TOKEN }}
+    - name: Build and push the Docker image
+      run: ARCH=amd64 DOCKER_DEV_ACCOUNT=docker.io/industrialdiscipline DOCKER_IMAGE_TAG=$(date +%s) make dev-docker-image
