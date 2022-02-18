@@ -317,9 +317,9 @@ tests/bpf_nat_tests.o: tests/bpf_nat_tests.ll
 	@$(ECHO_CC)
 	$(QUIET) ${LLC} ${LLC_FLAGS} -filetype=obj -o $@ $(patsubst %.o,%.ll,$@)
 
-.PHONY: go_prog_test
-go_prog_test: $(BPF_TEST)
-	$(GO) test -tags privileged_tests -exec sudo ./tests/prog_test
+.PHONY: go_prog_ct_test
+go_prog_ct_test: $(BPF_TEST)
+	$(GO) test -tags privileged_tests -exec sudo ./tests/prog_ct_test
 
 .PHONY: go_prog_nat_test
 go_prog_nat_test: $(BPF_TEST)
