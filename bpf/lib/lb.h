@@ -345,6 +345,8 @@ static __always_inline int extract_l4_port(struct __ctx_buff *ctx, __u8 nexthdr,
 {
 	int ret;
 
+	printk("extract l4 port, nextthdr=%d", nexthdr);
+
 	switch (nexthdr) {
 	case IPPROTO_TCP:
 	case IPPROTO_UDP:
@@ -367,14 +369,59 @@ static __always_inline int extract_l4_port(struct __ctx_buff *ctx, __u8 nexthdr,
 		break;
 
 	case IPPROTO_ICMPV6:
-	case IPPROTO_ICMP:
-		/* No need to perform a service lookup for ICMP packets */
 		return DROP_NO_SERVICE;
+	case IPPROTO_ICMP: {
+		struct icmphdr icmphdr __align_stack_8;
 
+		printk("extract l4 port, handling icmp...");
+
+		if (ctx_load_bytes(ctx, l4_off, &icmphdr, sizeof(icmphdr)) < 0)
+			return DROP_INVALID;
+
+		if (icmphdr.type != ICMP_DEST_UNREACH) {
+			return DROP_NO_SERVICE;
+		}
+
+		printk("extract l4 port, reading embedded headers...");
+
+		// Read embedded headers
+		if (1) {
+			struct iphdr iphdr;
+			__u32 icmpoff = l4_off + sizeof(icmphdr);
+			struct {
+				__be16 sport;
+				__be16 dport;
+			} l4hdr;
+
+			printk("extract l4 port, p1");
+			if (ctx_load_bytes(ctx, icmpoff, &iphdr,
+							   sizeof(iphdr)) < 0)
+				return DROP_INVALID;
+			printk("extract l4 port, p2");
+			icmpoff += iphdr.ihl * 4;
+			switch (iphdr.protocol) {
+			case IPPROTO_TCP:
+			case IPPROTO_UDP:
+				printk("extract l4 port, p3");
+				if (ctx_load_bytes(ctx, icmpoff, &l4hdr,
+								   sizeof(l4hdr)) < 0)
+					return DROP_INVALID;
+				*port = l4hdr.dport;
+				printk("extract l4 port, extracted port=%d", *port);
+				break;
+			default:
+				printk("extract l4 port, drop no service");
+				return DROP_NO_SERVICE;
+			}
+		}
+		break;
+	}
 	default:
 		/* Pass unknown L4 to stack */
 		return DROP_UNKNOWN_L4;
 	}
+
+	printk("extract l4 port, ending with port=%d", *port);
 
 	return 0;
 }

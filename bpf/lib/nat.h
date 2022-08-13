@@ -317,8 +317,10 @@ static __always_inline int snat_v4_handle_mapping(struct __ctx_buff *ctx,
 		return tuple->nexthdr != IPPROTO_ICMP &&
 		       bpf_ntohs(tuple->dport) < target->min_port ?
 		       NAT_PUNT_TO_STACK : DROP_NAT_NO_MAPPING;
-	else
+	else {
+		printk("snat new session ! :-)");
 		return snat_v4_new_mapping(ctx, tuple, (*state = tmp), target);
+	}
 }
 
 static __always_inline int snat_v4_icmp_rewrite_embedded(struct __ctx_buff *ctx,
@@ -664,6 +666,8 @@ snat_v4_process(struct __ctx_buff *ctx, enum nat_dir dir,
 				 * packet should embed the original packet in its
 				 * response.
 				 */
+
+				printk("snat handling icmp need to frag packed");
 
 				if (ctx_load_bytes(ctx, icmpoff, &iphdr,
 						   sizeof(iphdr)) < 0)
