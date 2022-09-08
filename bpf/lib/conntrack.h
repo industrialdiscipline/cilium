@@ -688,6 +688,25 @@ static __always_inline int ct_lookup4(const void *map,
 
 			switch (type) {
 			case ICMP_DEST_UNREACH:
+				if (1) {
+					struct iphdr iphdr;
+					__u32 icmpoff = off + sizeof(struct icmphdr);
+					struct {
+						__be16 sport;
+						__be16 dport;
+					} l4hdr;
+
+					if (ctx_load_bytes(ctx, icmpoff, &iphdr,
+									   sizeof(iphdr)) < 0)
+						return DROP_INVALID;
+
+					icmpoff += ipv4_hdrlen(&iphdr);
+					if (ctx_load_bytes(ctx, icmpoff, &l4hdr,
+									   sizeof(l4hdr)) < 0)
+						return DROP_INVALID;
+					tuple->sport = l4hdr.dport;
+					tuple->dport = l4hdr.sport;
+				}
 			case ICMP_TIME_EXCEEDED:
 			case ICMP_PARAMETERPROB:
 				tuple->flags |= TUPLE_F_RELATED;

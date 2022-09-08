@@ -370,10 +370,44 @@ static __always_inline int extract_l4_port(struct __ctx_buff *ctx, __u8 nexthdr,
 		break;
 
 	case IPPROTO_ICMPV6:
-	case IPPROTO_ICMP:
-		/* No need to perform a service lookup for ICMP packets */
 		return DROP_NO_SERVICE;
+	case IPPROTO_ICMP: {
+		struct icmphdr icmphdr __align_stack_8;
 
+		if (ctx_load_bytes(ctx, l4_off, &icmphdr, sizeof(icmphdr)) < 0)
+			return DROP_INVALID;
+		if (icmphdr.type != ICMP_DEST_UNREACH) {
+			return DROP_NO_SERVICE;
+		}
+
+		// Read embedded headers
+		if (1) {
+			struct iphdr iphdr;
+			__u32 icmpoff = l4_off + sizeof(icmphdr);
+			struct {
+				__be16 sport;
+				__be16 dport;
+			} l4hdr;
+
+			if (ctx_load_bytes(ctx, icmpoff, &iphdr,
+							   sizeof(iphdr)) < 0)
+				return DROP_INVALID;
+
+			icmpoff += ipv4_hdrlen(&iphdr);
+			switch (iphdr.protocol) {
+			case IPPROTO_TCP:
+			case IPPROTO_UDP:
+				if (ctx_load_bytes(ctx, icmpoff, &l4hdr,
+								   sizeof(l4hdr)) < 0)
+					return DROP_INVALID;
+				*port = l4hdr.sport;
+				break;
+			default:
+				return DROP_NO_SERVICE;
+			}
+		}
+		break;
+	}
 	default:
 		/* Pass unknown L4 to stack */
 		return DROP_UNKNOWN_L4;
@@ -1335,6 +1369,43 @@ lb4_xlate(struct __ctx_buff *ctx, __be32 *new_daddr, __be32 *new_saddr __maybe_u
 
 	if (skip_l3_xlate)
 		goto l4_xlate;
+
+	if (nexthdr == IPPROTO_ICMP) {
+		__u8 type;
+		struct iphdr iphdr;
+		__u32 icmpoff = l4_off + sizeof(struct icmphdr);
+		__be32 suml4 = 0;
+		struct csum_offset csum = {};
+
+		if (ctx_load_bytes(ctx, l4_off +
+						   offsetof(struct icmphdr, type),
+						   &type, 1) < 0)
+			return DROP_WRITE_ERROR;
+
+		/* rev-NAT embedded packet.  */
+		if (type == ICMP_DEST_UNREACH) {
+			if (ctx_load_bytes(ctx, icmpoff, &iphdr,
+							   sizeof(iphdr)) < 0)
+				return DROP_INVALID;
+			csum_l4_offset_and_flags(iphdr.protocol, &csum);
+			if (ctx_store_bytes(ctx, icmpoff + ipv4_hdrlen(&iphdr) +
+								offsetof(struct tcphdr, source),
+								&backend->port,
+								sizeof(backend->port), 0) < 0)
+				return DROP_WRITE_ERROR;
+			suml4 = csum_diff(&key->dport, 4, &backend->port, 4, 0);
+			if (csum_l4_replace(ctx, icmpoff + ipv4_hdrlen(&iphdr),
+								&csum, 0, suml4, 0) < 0)
+				return DROP_CSUM_L4;
+			if (ctx_store_bytes(ctx, icmpoff + offsetof(struct iphdr, saddr),
+								new_daddr, 4, 0) < 0)
+				return DROP_WRITE_ERROR;
+			sum = csum_diff(&key->address, 4, new_daddr, 4, 0);
+			if (l3_csum_replace(ctx, icmpoff + offsetof(struct iphdr, check),
+								0, sum, 0) < 0)
+				return DROP_CSUM_L3;
+		}
+	}
 
 	ret = ctx_store_bytes(ctx, l3_off + offsetof(struct iphdr, daddr),
 			      new_daddr, 4, 0);
