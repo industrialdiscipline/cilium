@@ -1023,17 +1023,22 @@ static __always_inline int snat_v6_rewrite_ingress(struct __ctx_buff *ctx,
 			return DROP_CSUM_L4;
 #endif  /* ENABLE_SCTP */
 		case IPPROTO_ICMPV6: {
+			__u8 type = 0;
 			__be32 from, to;
 
-			if (ctx_store_bytes(ctx, off +
-					    offsetof(struct icmp6hdr,
-						     icmp6_dataun.u_echo.identifier),
-					    &state->to_dport,
-					    sizeof(state->to_dport), 0) < 0)
+			if (ctx_load_bytes(ctx, off, &type, 1) < 0)
 				return DROP_WRITE_ERROR;
-			from = tuple->dport;
-			to = state->to_dport;
-			sum = csum_diff(&from, 4, &to, 4, sum);
+			if (type == ICMP_ECHO || type == ICMP_ECHOREPLY) {
+				if (ctx_store_bytes(ctx, off +
+							offsetof(struct icmp6hdr,
+								 icmp6_dataun.u_echo.identifier),
+						    &state->to_dport,
+						    sizeof(state->to_dport), 0) < 0)
+					return DROP_WRITE_ERROR;
+				from = tuple->dport;
+				to = state->to_dport;
+				sum = csum_diff(&from, 4, &to, 4, sum);
+			}
 			break;
 		}}
 	}
