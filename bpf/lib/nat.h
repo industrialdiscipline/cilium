@@ -431,18 +431,25 @@ static __always_inline int snat_v4_rewrite_ingress(struct __ctx_buff *ctx,
 			return DROP_CSUM_L4;
 #endif  /* ENABLE_SCTP */
 		case IPPROTO_ICMP: {
+			__u8 type = 0;
 			__be32 from, to;
 
-			if (ctx_store_bytes(ctx, off +
-					    offsetof(struct icmphdr, un.echo.id),
-					    &state->to_dport,
-					    sizeof(state->to_dport), 0) < 0)
+			if (ctx_load_bytes(ctx, off +
+					   offsetof(struct icmphdr, type),
+					   &type, 1) < 0)
 				return DROP_WRITE_ERROR;
-			from = tuple->dport;
-			to = state->to_dport;
-			flags = 0; /* ICMPv4 has no pseudo-header */
-			sum_l4 = csum_diff(&from, 4, &to, 4, 0);
-			csum.offset = offsetof(struct icmphdr, checksum);
+			if (type == ICMP_ECHO || type == ICMP_ECHOREPLY) {
+				if (ctx_store_bytes(ctx, off +
+							offsetof(struct icmphdr, un.echo.id),
+						    &state->to_dport,
+						    sizeof(state->to_dport), 0) < 0)
+					return DROP_WRITE_ERROR;
+			    from = tuple->dport;
+			    to = state->to_dport;
+			    flags = 0; /* ICMPv4 has no pseudo-header */
+			    sum_l4 = csum_diff(&from, 4, &to, 4, 0);
+			    csum.offset = offsetof(struct icmphdr, checksum);
+			}
 			break;
 		}}
 	}
