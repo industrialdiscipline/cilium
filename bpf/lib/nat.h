@@ -602,18 +602,15 @@ static __always_inline int snat_v4_rewrite_egress(struct __ctx_buff *ctx,
 				return DROP_CSUM_L4;
 #endif  /* ENABLE_SCTP */
 			case IPPROTO_ICMP: {
-				__be32 from, to;
-
 				if (ctx_store_bytes(ctx, off +
 						    offsetof(struct icmphdr, un.echo.id),
 						    &state->to_sport,
 						    sizeof(state->to_sport), 0) < 0)
 					return DROP_WRITE_ERROR;
-				from = tuple->sport;
-				to = state->to_sport;
-				flags = 0; /* ICMPv4 has no pseudo-header */
-				sum_l4 = csum_diff(&from, 4, &to, 4, 0);
-				csum.offset = offsetof(struct icmphdr, checksum);
+				if (l4_csum_replace(ctx, off + offsetof(struct icmphdr, checksum),
+						    tuple->sport,
+						    state->to_sport, 0) < 0)
+					return DROP_WRITE_ERROR;
 				break;
 			}}
 		}
@@ -662,7 +659,6 @@ static __always_inline int snat_v4_rewrite_ingress(struct __ctx_buff *ctx,
 #endif  /* ENABLE_SCTP */
 		case IPPROTO_ICMP: {
 			__u8 type = 0;
-			__be32 from, to;
 
 			if (ctx_load_bytes(ctx, off +
 					   offsetof(struct icmphdr, type),
@@ -674,11 +670,11 @@ static __always_inline int snat_v4_rewrite_ingress(struct __ctx_buff *ctx,
 						    &state->to_dport,
 						    sizeof(state->to_dport), 0) < 0)
 					return DROP_WRITE_ERROR;
-				from = tuple->dport;
-				to = state->to_dport;
-				flags = 0; /* ICMPv4 has no pseudo-header */
-				sum_l4 = csum_diff(&from, 4, &to, 4, 0);
-				csum.offset = offsetof(struct icmphdr, checksum);
+				if (l4_csum_replace(ctx, off + offsetof(
+							    struct icmphdr, checksum),
+						    tuple->dport,
+						    state->to_dport, 0) < 0)
+					return DROP_WRITE_ERROR;
 			}
 			break;
 		}}
@@ -1645,17 +1641,16 @@ static __always_inline int snat_v6_rewrite_egress(struct __ctx_buff *ctx,
 			return DROP_CSUM_L4;
 #endif  /* ENABLE_SCTP */
 		case IPPROTO_ICMPV6: {
-			__be32 from, to;
-
 			if (ctx_store_bytes(ctx, off +
 					    offsetof(struct icmp6hdr,
 						     icmp6_dataun.u_echo.identifier),
 					    &state->to_sport,
 					    sizeof(state->to_sport), 0) < 0)
 				return DROP_WRITE_ERROR;
-			from = tuple->sport;
-			to = state->to_sport;
-			sum = csum_diff(&from, 4, &to, 4, sum);
+			if (l4_csum_replace(ctx, off + offsetof(struct icmphdr, checksum),
+					    tuple->sport,
+					    state->to_sport, 0) < 0)
+				return DROP_WRITE_ERROR;
 			break;
 		}}
 	}
@@ -1699,7 +1694,6 @@ static __always_inline int snat_v6_rewrite_ingress(struct __ctx_buff *ctx,
 #endif  /* ENABLE_SCTP */
 		case IPPROTO_ICMPV6: {
 			__u8 type = 0;
-			__be32 from, to;
 
 			if (ctx_load_bytes(ctx, off, &type, 1) < 0)
 				return DROP_INVALID;
@@ -1710,9 +1704,10 @@ static __always_inline int snat_v6_rewrite_ingress(struct __ctx_buff *ctx,
 						    &state->to_dport,
 						    sizeof(state->to_dport), 0) < 0)
 					return DROP_WRITE_ERROR;
-				from = tuple->dport;
-				to = state->to_dport;
-				sum = csum_diff(&from, 4, &to, 4, sum);
+				if (l4_csum_replace(ctx, off + offsetof(struct icmphdr, checksum),
+						    tuple->dport,
+						    state->to_dport, 0) < 0)
+					return DROP_WRITE_ERROR;
 			}
 			break;
 		}}
